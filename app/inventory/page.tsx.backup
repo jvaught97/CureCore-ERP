@@ -1,0 +1,941 @@
+'use client'
+
+import { useEffect, useState } from 'react'
+import { useAuth } from '@/lib/auth-context'
+import { useRouter } from 'next/navigation'
+import { supabase } from '@/lib/supabase'
+import { AlertCircle, CheckCircle, Plus, X, History, Download, Edit, Trash2 } from 'lucide-react'
+import { Navigation } from '@/components/Navigation'
+import { exportInventoryToExcel, exportStockHistoryToExcel } from '@/lib/export-utils'
+
+type Ingredient = {
+  id: string
+  name: string
+  category: string
+  on_hand: number
+  unit: string
+  reorder_point: number
+}
+
+type FinishedGood = {
+  id: string
+  sku: string
+  name: string
+  on_hand: number
+  reorder_point: number
+}
+
+type StockAdjustment = {
+  id: string
+  item_type: string
+  item_id: string
+  qty_change: number
+  reason: string
+  created_at: string
+  users: {
+    name: string
+  }
+  ingredient_name?: string
+  finished_good_name?: string
+}
+
+const CATEGORIES = [
+  'All Categories',
+  'Base Ingredients',
+  'Oils & Butters',
+  'Cannabinoid',
+  'Extracts & Actives',
+  'Functional Additives',
+  'Preservatives & Antioxidants',
+  'Essential Oils'
+]
+
+export default function InventoryPage() {
+  const { user, profile, loading: authLoading } = useAuth()
+  const router = useRouter()
+  const [tab, setTab] = useState<'ingredients' | 'finished' | 'history'>('ingredients')
+  const [ingredients, setIngredients] = useState<Ingredient[]>([])
+  const [finishedGoods, setFinishedGoods] = useState<FinishedGood[]>([])
+  const [stockHistory, setStockHistory] = useState<StockAdjustment[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showIngredientForm, setShowIngredientForm] = useState(false)
+  const [showEditModal, setShowEditModal] = useState(false)
+  const [editingIngredient, setEditingIngredient] = useState<Ingredient | null>(null)
+  const [showAdjustModal, setShowAdjustModal] = useState(false)
+  const [adjustingItem, setAdjustingItem] = useState<any>(null)
+  const [adjustType, setAdjustType] = useState<'add' | 'subtract'>('add')
+  const [selectedCategory, setSelectedCategory] = useState('All Categories')
+  
+  const [newIngName, setNewIngName] = useState('')
+  const [newIngCategory, setNewIngCategory] = useState('Base Ingredients')
+  const [newIngUnit, setNewIngUnit] = useState('g')
+  const [newIngOnHand, setNewIngOnHand] = useState('')
+  const [newIngReorderPoint, setNewIngReorderPoint] = useState('')
+  
+  const [editIngName, setEditIngName] = useState('')
+  const [editIngCategory, setEditIngCategory] = useState('')
+  const [editIngUnit, setEditIngUnit] = useState('g')
+  const [editIngReorderPoint, setEditIngReorderPoint] = useState('')
+  
+  const [adjustQty, setAdjustQty] = useState('')
+  const [adjustReason, setAdjustReason] = useState('')
+
+  useEffect(() => {
+    if (!authLoading && !user) {
+      router.push('/login')
+    }
+  }, [user, authLoading, router])
+
+  useEffect(() => {
+    if (user) {
+      fetchInventory()
+      fetchStockHistory()
+    }
+  }, [user])
+
+  async function fetchInventory() {
+    setLoading(true)
+    try {
+      const { data: ingredientsData, error: ingredientsError } = await supabase
+        .from('ingredients')
+        .select('*')
+        .eq('status', 'active')
+        .order('name')
+
+      if (ingredientsError) throw ingredientsError
+      setIngredients(ingredientsData || [])
+
+      const { data: finishedData, error: finishedError } = await supabase
+        .from('finished_goods')
+        .select('*')
+        .eq('status', 'active')
+        .order('sku')
+
+      if (finishedError) throw finishedError
+      setFinishedGoods(finishedData || [])
+    } catch (error) {
+      console.error('Error fetching inventory:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function fetchStockHistory() {
+    try {
+      const { data, error } = await supabase
+        .from('stock_adjustments')
+        .select(`
+          *,
+          users (name)
+        `)
+        .order('created_at', { ascending: false })
+        .limit(100)
+
+      if (error) throw error
+
+      // Enrich with item names
+      const enriched = await Promise.all(
+        (data || []).map(async (adj) => {
+          if (adj.item_type === 'ingredient') {
+            const { data: ing } = await supabase
+              .from('ingredients')
+              .select('name')
+              .eq('id', adj.item_id)
+              .single()
+            return { ...adj, ingredient_name: ing?.name }
+          } else {
+            const { data: fg } = await supabase
+              .from('finished_goods')
+              .select('name')
+              .eq('id', adj.item_id)
+              .single()
+            return { ...adj, finished_good_name: fg?.name }
+          }
+        })
+      )
+
+      setStockHistory(enriched)
+    } catch (error) {
+      console.error('Error fetching stock history:', error)
+    }
+  }
+
+  async function handleAddIngredient(e: React.FormEvent) {
+    e.preventDefault()
+    
+    try {
+      const { error } = await supabase
+        .from('ingredients')
+        .insert({
+          name: newIngName,
+          category: newIngCategory,
+          unit: newIngUnit,
+          on_hand: parseFloat(newIngOnHand),
+          reorder_point: parseFloat(newIngReorderPoint),
+          organic_cert: true,
+          status: 'active'
+        })
+
+      if (error) throw error
+
+      setNewIngName('')
+      setNewIngCategory('Base Ingredients')
+      setNewIngUnit('g')
+      setNewIngOnHand('')
+      setNewIngReorderPoint('')
+      setShowIngredientForm(false)
+      
+      fetchInventory()
+    } catch (error) {
+      console.error('Error adding ingredient:', error)
+      alert('Error adding ingredient. Please try again.')
+    }
+  }
+
+  function openAdjustModal(item: any, itemType: 'ingredient' | 'finished_good') {
+    setAdjustingItem({ ...item, itemType })
+    setAdjustQty('')
+    setAdjustReason('')
+    setAdjustType('add')
+    setShowAdjustModal(true)
+  }
+
+  async function handleAdjustStock(e: React.FormEvent) {
+    e.preventDefault()
+    
+    if (!adjustingItem) return
+    
+    try {
+      const qtyChange = adjustType === 'add' 
+        ? parseFloat(adjustQty) 
+        : -parseFloat(adjustQty)
+      
+      const newOnHand = adjustingItem.on_hand + qtyChange
+      
+      if (newOnHand < 0) {
+        alert('Cannot reduce stock below zero')
+        return
+      }
+
+      const table = adjustingItem.itemType === 'ingredient' ? 'ingredients' : 'finished_goods'
+      const { error: updateError } = await supabase
+        .from(table)
+        .update({ on_hand: newOnHand })
+        .eq('id', adjustingItem.id)
+
+      if (updateError) throw updateError
+
+      const { error: logError } = await supabase
+        .from('stock_adjustments')
+        .insert({
+          item_type: adjustingItem.itemType,
+          item_id: adjustingItem.id,
+          qty_change: qtyChange,
+          reason: adjustReason,
+          adjusted_by: user?.id
+        })
+
+      if (logError) throw logError
+
+      setShowAdjustModal(false)
+      setAdjustingItem(null)
+      fetchInventory()
+      fetchStockHistory()
+    } catch (error) {
+      console.error('Error adjusting stock:', error)
+      alert('Error adjusting stock. Please try again.')
+    }
+  }
+
+  function openEditModal(ingredient: Ingredient) {
+    setEditingIngredient(ingredient)
+    setEditIngName(ingredient.name)
+    setEditIngCategory(ingredient.category)
+    setEditIngUnit(ingredient.unit)
+    setEditIngReorderPoint(ingredient.reorder_point.toString())
+    setShowEditModal(true)
+  }
+
+  async function handleEditIngredient(e: React.FormEvent) {
+    e.preventDefault()
+    
+    if (!editingIngredient) return
+    
+    try {
+      const { error } = await supabase
+        .from('ingredients')
+        .update({
+          name: editIngName,
+          category: editIngCategory,
+          unit: editIngUnit,
+          reorder_point: parseFloat(editIngReorderPoint)
+        })
+        .eq('id', editingIngredient.id)
+
+      if (error) throw error
+
+      setShowEditModal(false)
+      setEditingIngredient(null)
+      fetchInventory()
+    } catch (error) {
+      console.error('Error updating ingredient:', error)
+      alert('Error updating ingredient. Please try again.')
+    }
+  }
+
+  async function handleDeleteIngredient(ingredient: Ingredient) {
+    if (!confirm(`Are you sure you want to delete "${ingredient.name}"? This cannot be undone.`)) {
+      return
+    }
+
+    try {
+      const { error } = await supabase
+        .from('ingredients')
+        .delete()
+        .eq('id', ingredient.id)
+
+      if (error) throw error
+      fetchInventory()
+    } catch (error) {
+      console.error('Error deleting ingredient:', error)
+      alert('Error deleting ingredient. It may be used in formulations.')
+    }
+  }
+
+  const lowStockIngredients = ingredients.filter(ing => ing.on_hand < ing.reorder_point)
+  const lowStockFinished = finishedGoods.filter(fg => fg.on_hand < fg.reorder_point)
+
+  const filteredIngredients = selectedCategory === 'All Categories'
+    ? ingredients
+    : ingredients.filter(ing => ing.category === selectedCategory)
+
+  if (authLoading || !user || !profile) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-gray-600">Loading...</div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <Navigation currentPage="inventory" />
+
+      <main className="max-w-7xl mx-auto px-4 py-8">
+        <div className="flex items-center justify-between mb-8">
+          <h1 className="text-3xl font-bold text-gray-900">Inventory</h1>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowIngredientForm(true)}
+              className="flex items-center gap-2 bg-[#174940] text-white px-4 py-2 rounded hover:bg-[#1a5c51]"
+            >
+              <Plus className="w-4 h-4" />
+              Add Ingredient
+            </button>
+            <button
+              onClick={() => tab === 'history' ? exportStockHistoryToExcel(stockHistory) : exportInventoryToExcel(tab === 'ingredients' ? ingredients : finishedGoods)}
+              className="flex items-center gap-2 bg-white text-[#174940] border border-[#174940] px-4 py-2 rounded hover:bg-gray-50"
+            >
+              <Download className="w-4 h-4" />
+              Export
+            </button>
+          </div>
+        </div>
+
+        {/* Alerts */}
+        {(lowStockIngredients.length > 0 || lowStockFinished.length > 0) && (
+          <div className="mb-6 bg-orange-50 border border-orange-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-orange-600 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <h3 className="font-semibold text-orange-900 mb-1">Low Stock Alerts</h3>
+                {lowStockIngredients.length > 0 && (
+                  <p className="text-sm text-orange-800">
+                    <strong>{lowStockIngredients.length}</strong> ingredient{lowStockIngredients.length !== 1 ? 's' : ''} below reorder point
+                  </p>
+                )}
+                {lowStockFinished.length > 0 && (
+                  <p className="text-sm text-orange-800">
+                    <strong>{lowStockFinished.length}</strong> finished good{lowStockFinished.length !== 1 ? 's' : ''} below reorder point
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Tabs */}
+        <div className="flex gap-2 mb-6 border-b border-gray-200">
+          <button
+            onClick={() => setTab('ingredients')}
+            className={`px-4 py-2 -mb-px ${
+              tab === 'ingredients'
+                ? 'border-b-2 border-[#174940] text-[#174940] font-medium'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            Ingredients
+          </button>
+          <button
+            onClick={() => setTab('finished')}
+            className={`px-4 py-2 -mb-px ${
+              tab === 'finished'
+                ? 'border-b-2 border-[#174940] text-[#174940] font-medium'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            Finished Goods
+          </button>
+          <button
+            onClick={() => setTab('history')}
+            className={`px-4 py-2 -mb-px flex items-center gap-2 ${
+              tab === 'history'
+                ? 'border-b-2 border-[#174940] text-[#174940] font-medium'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <History className="w-4 h-4" />
+            Stock History
+          </button>
+        </div>
+
+        {/* Category Filter (only for ingredients tab) */}
+        {tab === 'ingredients' && (
+          <div className="mb-6">
+            <div className="flex gap-2 overflow-x-auto pb-2">
+              {CATEGORIES.map((category) => (
+                <button
+                  key={category}
+                  onClick={() => setSelectedCategory(category)}
+                  className={`px-4 py-2 rounded whitespace-nowrap transition-colors ${
+                    selectedCategory === category
+                      ? 'bg-[#174940] text-white'
+                      : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  {category}
+                  {category !== 'All Categories' && (
+                    <span className="ml-2 text-xs opacity-75">
+                      ({ingredients.filter(ing => ing.category === category).length})
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {loading ? (
+          <div className="bg-white rounded-lg shadow p-12 text-center">
+            <div className="text-gray-600">Loading...</div>
+          </div>
+        ) : (
+          <>
+            {/* Ingredients Tab */}
+            {tab === 'ingredients' && (
+              <div className="bg-white rounded-lg shadow overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ingredient</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">On Hand</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Reorder Point</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {filteredIngredients.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="px-6 py-12 text-center text-gray-500">
+                            No ingredients found in this category.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredIngredients.map((ing) => {
+                          const isLow = ing.on_hand < ing.reorder_point
+                          return (
+                            <tr key={ing.id} className={isLow ? 'bg-orange-50' : 'hover:bg-gray-50'}>
+                              <td className="px-6 py-4 text-sm font-medium text-gray-900">{ing.name}</td>
+                              <td className="px-6 py-4 text-sm text-gray-700">{ing.category}</td>
+                              <td className="px-6 py-4 text-sm text-right">
+                                <span className={isLow ? 'text-orange-600 font-semibold' : 'text-gray-900'}>
+                                  {ing.on_hand} {ing.unit}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 text-sm text-gray-700 text-right">
+                                {ing.reorder_point} {ing.unit}
+                              </td>
+                              <td className="px-6 py-4">
+                                {isLow ? (
+                                  <span className="flex items-center gap-1 text-orange-600 text-xs font-medium">
+                                    <AlertCircle className="w-3 h-3" />
+                                    Low Stock
+                                  </span>
+                                ) : (
+                                  <span className="flex items-center gap-1 text-green-600 text-xs font-medium">
+                                    <CheckCircle className="w-3 h-3" />
+                                    In Stock
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-6 py-4 text-sm text-right">
+                                <div className="flex items-center justify-end gap-2">
+                                  <button
+                                    onClick={() => openEditModal(ing)}
+                                    className="text-blue-600 hover:text-blue-800"
+                                    title="Edit"
+                                  >
+                                    <Edit className="w-4 h-4" />
+                                  </button>
+                                  <button
+                                    onClick={() => openAdjustModal(ing, 'ingredient')}
+                                    className="text-[#174940] hover:underline text-xs"
+                                  >
+                                    Adjust
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteIngredient(ing)}
+                                    className="text-red-600 hover:text-red-800"
+                                    title="Delete"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Finished Goods Tab */}
+            {tab === 'finished' && (
+              <div className="bg-white rounded-lg shadow overflow-hidden">
+                <div className="p-4 border-b border-gray-200">
+                  <h2 className="font-semibold text-gray-900">Finished Products</h2>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">SKU</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">On Hand</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Reorder Point</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {finishedGoods.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="px-6 py-12 text-center text-gray-500">
+                            No finished goods yet.
+                          </td>
+                        </tr>
+                      ) : (
+                        finishedGoods.map((fg) => {
+                          const isLow = fg.on_hand < fg.reorder_point
+                          return (
+                            <tr key={fg.id} className={isLow ? 'bg-orange-50' : 'hover:bg-gray-50'}>
+                              <td className="px-6 py-4 text-sm font-medium text-gray-900">{fg.sku}</td>
+                              <td className="px-6 py-4 text-sm text-gray-700">{fg.name}</td>
+                              <td className="px-6 py-4 text-sm text-right">
+                                <span className={isLow ? 'text-orange-600 font-semibold' : 'text-gray-900'}>
+                                  {fg.on_hand}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 text-sm text-gray-700 text-right">{fg.reorder_point}</td>
+                              <td className="px-6 py-4">
+                                {isLow ? (
+                                  <span className="flex items-center gap-1 text-orange-600 text-xs font-medium">
+                                    <AlertCircle className="w-3 h-3" />
+                                    Low Stock
+                                  </span>
+                                ) : (
+                                  <span className="flex items-center gap-1 text-green-600 text-xs font-medium">
+                                    <CheckCircle className="w-3 h-3" />
+                                    In Stock
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-6 py-4 text-sm text-right">
+                                <button
+                                  onClick={() => openAdjustModal(fg, 'finished_good')}
+                                  className="text-[#174940] hover:underline"
+                                >
+                                  Adjust
+                                </button>
+                              </td>
+                            </tr>
+                          )
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Stock History Tab */}
+            {tab === 'history' && (
+              <div className="bg-white rounded-lg shadow overflow-hidden">
+                <div className="p-4 border-b border-gray-200">
+                  <h2 className="font-semibold text-gray-900">Recent Adjustments</h2>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
+                        <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Change</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reason</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">By</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {stockHistory.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="px-6 py-12 text-center text-gray-500">
+                            No stock adjustments yet.
+                          </td>
+                        </tr>
+                      ) : (
+                        stockHistory.map((adj) => (
+                          <tr key={adj.id} className="hover:bg-gray-50">
+                            <td className="px-6 py-4 text-sm text-gray-700">
+                              {new Date(adj.created_at).toLocaleDateString()}
+                            </td>
+                            <td className="px-6 py-4 text-sm text-gray-900">
+                              {adj.ingredient_name || adj.finished_good_name}
+                            </td>
+                            <td className="px-6 py-4 text-sm text-right">
+                              <span className={`font-medium ${
+                                adj.qty_change > 0 ? 'text-green-600' : 'text-red-600'
+                              }`}>
+                                {adj.qty_change > 0 ? '+' : ''}{adj.qty_change}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 text-sm text-gray-700">{adj.reason}</td>
+                            <td className="px-6 py-4 text-sm text-gray-700">{adj.users?.name}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </main>
+
+      {/* Add Ingredient Modal */}
+      {showIngredientForm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold text-gray-900">Add Ingredient</h2>
+              <button onClick={() => setShowIngredientForm(false)}>
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleAddIngredient} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <input
+                  type="text"
+                  value={newIngName}
+                  onChange={(e) => setNewIngName(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-gray-900"
+                  placeholder="e.g., Coconut Oil"
+                  required
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                <select
+                  value={newIngCategory}
+                  onChange={(e) => setNewIngCategory(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-gray-900"
+                  required
+                >
+                  <option value="">Select category...</option>
+                  {CATEGORIES.filter(c => c !== 'All Categories').map(cat => (
+                    <option key={cat} value={cat}>{cat}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Unit</label>
+                  <select
+                    value={newIngUnit}
+                    onChange={(e) => setNewIngUnit(e.target.value)}
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-gray-900"
+                  >
+                    <option value="g">g (grams)</option>
+                    <option value="kg">kg (kilograms)</option>
+                    <option value="ml">ml (milliliters)</option>
+                    <option value="L">L (liters)</option>
+                    <option value="oz">oz (ounces)</option>
+                    <option value="lb">lb (pounds)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">On-Hand Qty</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={newIngOnHand}
+                    onChange={(e) => setNewIngOnHand(e.target.value)}
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-gray-900"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Reorder Point</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={newIngReorderPoint}
+                  onChange={(e) => setNewIngReorderPoint(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-gray-900"
+                  placeholder="Low stock alert threshold"
+                  required
+                />
+              </div>
+
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowIngredientForm(false)}
+                  className="px-4 py-2 border border-gray-300 rounded hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-[#174940] text-white rounded hover:bg-[#1a5c51]"
+                >
+                  Add Ingredient
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Adjust Stock Modal */}
+      {showAdjustModal && adjustingItem && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold text-gray-900">Adjust Stock</h2>
+              <button onClick={() => setShowAdjustModal(false)}>
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="mb-4 p-3 bg-gray-50 rounded">
+              <div className="text-sm font-medium text-gray-900">
+                {adjustingItem.name || adjustingItem.sku}
+              </div>
+              <div className="text-sm text-gray-600">
+                Current stock: {adjustingItem.on_hand} {adjustingItem.unit || 'units'}
+              </div>
+            </div>
+
+            <form onSubmit={handleAdjustStock} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Action</label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAdjustType('add')}
+                    className={`flex-1 px-4 py-2 rounded border ${
+                      adjustType === 'add'
+                        ? 'bg-green-50 border-green-500 text-green-700'
+                        : 'border-gray-300 text-gray-700'
+                    }`}
+                  >
+                    Add Stock
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAdjustType('subtract')}
+                    className={`flex-1 px-4 py-2 rounded border ${
+                      adjustType === 'subtract'
+                        ? 'bg-red-50 border-red-500 text-red-700'
+                        : 'border-gray-300 text-gray-700'
+                    }`}
+                  >
+                    Remove Stock
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Quantity</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={adjustQty}
+                  onChange={(e) => setAdjustQty(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-gray-900"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Reason</label>
+                <select
+                  value={adjustReason}
+                  onChange={(e) => setAdjustReason(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-gray-900"
+                  required
+                >
+                  <option value="">Select reason...</option>
+                  <option value="Received shipment">Received shipment</option>
+                  <option value="Used in batch">Used in batch</option>
+                  <option value="Damaged/Expired">Damaged/Expired</option>
+                  <option value="Inventory count adjustment">Inventory count adjustment</option>
+                  <option value="Returned to supplier">Returned to supplier</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+
+              <div className="p-3 bg-blue-50 rounded text-sm">
+                <strong>New stock level:</strong>{' '}
+                {adjustType === 'add'
+                  ? adjustingItem.on_hand + (parseFloat(adjustQty) || 0)
+                  : adjustingItem.on_hand - (parseFloat(adjustQty) || 0)
+                } {adjustingItem.unit || 'units'}
+              </div>
+
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowAdjustModal(false)}
+                  className="px-4 py-2 border border-gray-300 rounded hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-[#174940] text-white rounded hover:bg-[#1a5c51]"
+                >
+                  Confirm Adjustment
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Ingredient Modal */}
+      {showEditModal && editingIngredient && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold text-gray-900">Edit Ingredient</h2>
+              <button onClick={() => setShowEditModal(false)}>
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleEditIngredient} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <input
+                  type="text"
+                  value={editIngName}
+                  onChange={(e) => setEditIngName(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-gray-900"
+                  required
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                <select
+                  value={editIngCategory}
+                  onChange={(e) => setEditIngCategory(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-gray-900"
+                  required
+                >
+                  <option value="">Select category...</option>
+                  {CATEGORIES.filter(c => c !== 'All Categories').map(cat => (
+                    <option key={cat} value={cat}>{cat}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Unit</label>
+                  <select
+                    value={editIngUnit}
+                    onChange={(e) => setEditIngUnit(e.target.value)}
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-gray-900"
+                  >
+                    <option value="g">g (grams)</option>
+                    <option value="kg">kg (kilograms)</option>
+                    <option value="ml">ml (milliliters)</option>
+                    <option value="L">L (liters)</option>
+                    <option value="oz">oz (ounces)</option>
+                    <option value="lb">lb (pounds)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Reorder Point</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={editIngReorderPoint}
+                    onChange={(e) => setEditIngReorderPoint(e.target.value)}
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-gray-900"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="bg-yellow-50 border border-yellow-200 rounded p-3 text-sm text-yellow-800">
+                <strong>Note:</strong> On-hand quantity cannot be edited here. Use "Adjust" to change stock levels.
+              </div>
+
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowEditModal(false)}
+                  className="px-4 py-2 border border-gray-300 rounded hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-[#174940] text-white rounded hover:bg-[#1a5c51]"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

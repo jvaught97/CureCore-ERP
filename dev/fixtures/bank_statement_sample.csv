@@ -1,0 +1,8 @@
+date,description,amount,type,reference
+2024-12-14,Payment - Raw materials supplier,-1500.00,debit,WIRE-RAW-1500
+2024-12-19,ACH - Office rent,-2200.00,debit,ACH-RENT-2200
+2024-12-21,Deposit - Local Health Store,1200.00,credit,DEP-LHS-1200
+2024-12-23,Interest credit,75.00,credit,INT-75
+2024-12-26,Deposit - Whole Foods partial,2000.00,credit,DEP-WF-2000
+2024-12-27,Bank service fee,-35.00,debit,FEE-35
+2024-12-28,Deposit - Amazon Marketplace,3400.00,credit,DEP-AMZ-3400
